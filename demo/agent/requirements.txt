@@ -1,0 +1,1 @@
+# 决策核心仅依赖 Python 标准库；评测依赖见 demo/server/requirements.txt

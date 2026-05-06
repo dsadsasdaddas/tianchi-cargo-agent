@@ -1,0 +1,108 @@
+[
+  {
+    "driver_id": "D001",
+    "name": "张三",
+    "vehicle_no": "粤A12345",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 22.9,
+    "current_lng": 113.5
+  },
+  {
+    "driver_id": "D002",
+    "name": "李四",
+    "vehicle_no": "粤A22346",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 22.9,
+    "current_lng": 113.4
+  },
+  {
+    "driver_id": "D003",
+    "name": "王五",
+    "vehicle_no": "粤A32347",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.0,
+    "current_lng": 113.2
+  },
+  {
+    "driver_id": "D004",
+    "name": "赵六",
+    "vehicle_no": "粤A42348",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.1,
+    "current_lng": 113.2
+  },
+  {
+    "driver_id": "D005",
+    "name": "钱七",
+    "vehicle_no": "粤A52349",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.3,
+    "current_lng": 113.3
+  },
+  {
+    "driver_id": "D006",
+    "name": "孙八",
+    "vehicle_no": "粤A62350",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.3,
+    "current_lng": 113.4,
+    "preferences": [
+      "我每天至少要有一段连续5小时以上的完整休息时间，尽量不要把单子排得太碎（每天不满足会扣钱400元，累计上限扣钱4000元）。"
+    ]
+  },
+  {
+    "driver_id": "D007",
+    "name": "周九",
+    "vehicle_no": "粤A72351",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.0,
+    "current_lng": 113.4,
+    "preferences": [
+      "晚上23:00到次日04:00我不接单（也不空驶），夜里主要休整（每天不满足会扣钱500元，累计上限扣钱5000元）。"
+    ]
+  },
+  {
+    "driver_id": "D008",
+    "name": "吴十",
+    "vehicle_no": "粤A82352",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.0,
+    "current_lng": 113.6,
+    "preferences": [
+      "每个月我至少要有2天完全不出车，当作家庭陪伴和车辆保养日（整月不满足一次性扣钱3000元）。"
+    ]
+  },
+  {
+    "driver_id": "D009",
+    "name": "郑一",
+    "vehicle_no": "粤A92353",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.1,
+    "current_lng": 113.3,
+    "preferences": [
+      "我希望每天23:00前回到家附近1公里内（我家坐标是 23.12, 113.28），到家后直到第二天08:00前不再接单或空驶（每天不满足会扣钱600元，累计上限扣钱6000元）。"
+    ]
+  },
+  {
+    "driver_id": "D010",
+    "name": "冯二",
+    "vehicle_no": "粤A02354",
+    "truck_length": "4.2米",
+    "cost_per_km": 1.5,
+    "current_lat": 23.1,
+    "current_lng": 113.6,
+    "preferences": [
+      "我每个月至少要到一个固定地点5次以上（目标点坐标 23.13, 113.26；同一天去多次只算1次；整月不满足一次性扣钱3000元）。",
+      "我有一个不想进入的区域：以 23.30, 113.52 为圆心半径 2km（进入扣钱3000元，最多扣一次）。"
+    ]
+  }
+]
