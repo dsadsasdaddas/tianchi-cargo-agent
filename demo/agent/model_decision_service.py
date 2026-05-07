@@ -105,6 +105,7 @@ class ModelDecisionService:
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"},
+                "enable_thinking": False,
             }
         )
         action = self._parse_action(model_resp)
