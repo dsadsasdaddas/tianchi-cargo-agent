@@ -16,8 +16,6 @@ DEFAULT_REPOSITION_SPEED_KM_PER_HOUR = 60.0
 DEFAULT_COST_PER_KM = 1.5
 TIME_VALUE_YUAN_PER_MINUTE = 0.2
 PROMPT_CANDIDATE_LIMIT = 10
-DIRECT_TAKE_SCORE_THRESHOLD = 80.0
-DIRECT_TAKE_NET_THRESHOLD = 150.0
 
 
 class ModelDecisionService:
@@ -26,11 +24,25 @@ class ModelDecisionService:
     def __init__(self, api: SimulationApiPort) -> None:
         self._api = api
         self._logger = logging.getLogger("agent.decision_service")
+        self._driver_memory: dict[str, dict[str, Any]] = {}
 
     def decide(self, driver_id: str) -> dict[str, Any]:
         status = self._api.get_driver_status(driver_id)
         lat = float(status["current_lat"])
         lng = float(status["current_lng"])
+        preferences = [str(x) for x in (status.get("preferences", []) or [])]
+        preference_constraints = _extract_preference_constraints(preferences)
+
+        # 已解析到“每天连续休息 N 分钟/小时”时，先用代码硬触发 wait。
+        # 这类规则不交给模型解析，避免模型为了偏好过度保守或反复短 wait。
+        rest_action = self._daily_rest_guard(
+            driver_id=driver_id,
+            current_minutes=int(status["simulation_progress_minutes"]),
+            preference_constraints=preference_constraints,
+        )
+        if rest_action is not None:
+            return rest_action
+
         cargo_resp = self._api.query_cargo(driver_id=driver_id, latitude=lat, longitude=lng)
         items = cargo_resp.get("items", [])
         status_after_query = self._api.get_driver_status(driver_id)
@@ -53,7 +65,7 @@ class ModelDecisionService:
                 remove_min = _wall_time_to_minutes(remove_time)
                 if remove_min < real_time:
                     continue
-            metrics = _estimate_cargo_metrics(item, real_time)
+            metrics = _estimate_cargo_metrics(item, real_time, lat, lng)
             if not metrics.get("feasible", False):
                 continue
             enriched_item = dict(item)
@@ -73,22 +85,16 @@ class ModelDecisionService:
         prompt_items = valid_items[:PROMPT_CANDIDATE_LIMIT]
         allowed_cargo_ids = {str((item.get("cargo") or {}).get("cargo_id", "")).strip() for item in prompt_items}
         allowed_cargo_ids.discard("")
-        preferences = [str(x) for x in (status.get("preferences", []) or [])]
         best_item = prompt_items[0]
         best_cargo_id = str((best_item.get("cargo") or {}).get("cargo_id", "")).strip()
-        best_metrics = best_item.get("_metrics") or {}
-        best_score = float(best_metrics.get("estimated_score", 0.0) or 0.0)
-        best_net = float(best_metrics.get("estimated_net_after_distance_cost", 0.0) or 0.0)
-        if not preferences and best_cargo_id and best_score >= DIRECT_TAKE_SCORE_THRESHOLD and best_net >= DIRECT_TAKE_NET_THRESHOLD:
-            self._logger.info(
-                "direct take_order driver_id=%s cargo_id=%s score=%.2f net=%.2f",
-                driver_id,
-                best_cargo_id,
-                best_score,
-                best_net,
-            )
-            return {"action": "take_order", "params": {"cargo_id": best_cargo_id}}
-        prompt = self._build_prompt(driver_id=driver_id, status=status, items=prompt_items, real_time=real_time)
+        prompt = self._build_prompt(
+            driver_id=driver_id,
+            status=status,
+            items=prompt_items,
+            real_time=real_time,
+            preferences=preferences,
+            preference_constraints=preference_constraints,
+        )
         self._logger.info("prompt_content driver_id=%s prompt=%s", driver_id, prompt[:500])
         model_resp = self._api.model_chat_completion(
             {
@@ -109,7 +115,7 @@ class ModelDecisionService:
                             "若订单无法在仿真上界前完成，动作仍可能执行，但收益不会被计入，应避免。"
                             "cargo_candidates 已通过基础可行性过滤，并按 estimated_score 从高到低排序。"
                             "优先选择 estimated_score 最高且不明确违反 preference_constraints 的 take_order。"
-                            "不要臆造未给出的隐藏偏好或额外风险。"
+                            "preference_constraints 是代码解析结果；不要重新解析、扩展或臆造原始偏好。"
                             "只有当所有候选收益为非正，或明确违反已解析的硬约束时，才选择 wait。"
                             "take_order 只能选择 cargo_candidates 中出现的 cargo_id，禁止编造 cargo_id。"
                         ),
@@ -124,8 +130,8 @@ class ModelDecisionService:
         if action.get("action") == "take_order":
             cargo_id = str((action.get("params") or {}).get("cargo_id", "")).strip()
             if cargo_id not in allowed_cargo_ids:
-                self._logger.warning("model returned cargo_id outside prompt candidates: %s; fallback wait", cargo_id)
-                return {"action": "wait", "params": {"duration_minutes": 15}}
+                self._logger.warning("model returned cargo_id outside prompt candidates: %s; fallback take best", cargo_id)
+                return {"action": "take_order", "params": {"cargo_id": best_cargo_id}}
         self._logger.info(
             "decision output driver_id=%s action=%s params=%s",
             driver_id,
@@ -134,15 +140,73 @@ class ModelDecisionService:
         )
         return action
 
-    def _build_prompt(self, driver_id: str, status: dict[str, Any], items: list[dict[str, Any]], real_time: int) -> str:
+    def _daily_rest_guard(
+        self,
+        *,
+        driver_id: str,
+        current_minutes: int,
+        preference_constraints: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        daily_rest = preference_constraints.get("daily_rest")
+        if not isinstance(daily_rest, dict):
+            return None
+        try:
+            required_minutes = int(daily_rest.get("min_continuous_minutes", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if required_minutes <= 0:
+            return None
+
+        memory = self._driver_memory.setdefault(driver_id, {})
+        rested_days: set[int] = memory.setdefault("daily_rest_days", set())
+        day_idx = int(current_minutes) // 1440
+        if day_idx in rested_days:
+            return None
+
+        minute_of_day = int(current_minutes) % 1440
+        remaining_today = 1440 - minute_of_day
+        if remaining_today >= required_minutes:
+            duration_minutes = required_minutes
+            rested_days.add(day_idx)
+            satisfied_day = day_idx
+        else:
+            # 今天剩余时间不够完成连续休息，则休到次日并顺带满足次日。
+            duration_minutes = remaining_today + required_minutes
+            rested_days.add(day_idx + 1)
+            satisfied_day = day_idx + 1
+
+        self._logger.info(
+            "daily_rest_guard driver_id=%s day=%s duration=%s required=%s current_min=%s",
+            driver_id,
+            satisfied_day,
+            duration_minutes,
+            required_minutes,
+            current_minutes,
+        )
+        return {"action": "wait", "params": {"duration_minutes": int(duration_minutes)}}
+
+    def _build_prompt(
+        self,
+        driver_id: str,
+        status: dict[str, Any],
+        items: list[dict[str, Any]],
+        real_time: int,
+        preferences: list[str] | None = None,
+        preference_constraints: dict[str, Any] | None = None,
+    ) -> str:
         cargo_candidates: list[dict[str, Any]] = []
-        preferences = [str(x) for x in (status.get("preferences", []) or [])]
-        preference_constraints = _extract_preference_constraints(preferences)
+        preferences = preferences if preferences is not None else [str(x) for x in (status.get("preferences", []) or [])]
+        preference_constraints = preference_constraints or _extract_preference_constraints(preferences)
         for item in items:
             cargo = item.get("cargo", {})
             metrics = item.get("_metrics")
             if not isinstance(metrics, dict):
-                metrics = _estimate_cargo_metrics(item, real_time)
+                metrics = _estimate_cargo_metrics(
+                    item,
+                    real_time,
+                    float(status.get("current_lat", 0.0) or 0.0),
+                    float(status.get("current_lng", 0.0) or 0.0),
+                )
             cargo_candidates.append(
                 {
                     "cargo_id": cargo.get("cargo_id"),
@@ -186,11 +250,10 @@ class ModelDecisionService:
             "cargo_candidates": cargo_candidates,
         }
         if preferences:
-            decision_context["preferences"] = preferences
-            decision_context["preference_constraints"] = preference_constraints
+            decision_context["preference_constraints"] = _constraints_for_prompt(preference_constraints)
             decision_context["decision_rules"].extend(
                 [
-                    "preference_constraints are parsed hints from preferences; obey explicit constraints but do not infer extra hidden rules.",
+                    "preference_constraints are parsed by code from driver preferences; do not re-parse raw preference text.",
                     "If a candidate does not explicitly conflict with parsed constraints, treat it as selectable.",
                 ]
             )
@@ -270,20 +333,12 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 def _parse_load_window(load_time: Any) -> tuple[int, int] | None:
     if load_time is None:
         return None
-    if not isinstance(load_time, list) or len(load_time) != 2:
-        return None
-    start_text = str(load_time[0]).strip()
-    end_text = str(load_time[1]).strip()
-    if not start_text or not end_text:
-        return None
-    start_min = _wall_time_to_minutes(start_text)
-    end_min = _wall_time_to_minutes(end_text)
-    if end_min < start_min:
-        return None
+    start_min = _wall_time_to_minutes(str(load_time[0]))
+    end_min = _wall_time_to_minutes(str(load_time[1]))
     return start_min, end_min
 
 
-def _estimate_cargo_metrics(item: dict[str, Any], real_time: int) -> dict[str, Any]:
+def _estimate_cargo_metrics(item: dict[str, Any], real_time: int, driver_lat: float = 0.0, driver_lng: float = 0.0) -> dict[str, Any]:
     """估算 take_order 的执行时间与简化收益。
 
     与 simkit.take_order 保持一致：
@@ -295,19 +350,17 @@ def _estimate_cargo_metrics(item: dict[str, Any], real_time: int) -> dict[str, A
     注意 query_cargo 已把 cargo.price 从“分”转成“元”，这里不能再 /100。
     """
     cargo = item.get("cargo") or {}
-    pickup_km = float(item.get("distance_km", 0.0) or 0.0)
+    start = cargo.get("start") or {}
+    feasible = True
+    risk_reasons: list[str] = []
+    pickup_km = _haversine_km(driver_lat, driver_lng, float(start["lat"]), float(start["lng"]))
     pickup_minutes = _pickup_minutes(pickup_km, DEFAULT_REPOSITION_SPEED_KM_PER_HOUR)
     arrival_min = int(real_time) + pickup_minutes
 
-    feasible = True
-    risk_reasons: list[str] = []
     load_wait_minutes = 0
     ready_min = arrival_min
     load_window = _parse_load_window(cargo.get("load_time"))
-    if cargo.get("load_time") is not None and load_window is None:
-        feasible = False
-        risk_reasons.append("invalid_load_time")
-    elif load_window is not None:
+    if load_window is not None:
         load_start_min, load_end_min = load_window
         if arrival_min > load_end_min:
             feasible = False
@@ -321,39 +374,22 @@ def _estimate_cargo_metrics(item: dict[str, Any], real_time: int) -> dict[str, A
     # 因此除了“决策时在线”，还要确保货源至少存活到 ready_min。
     remove_time = cargo.get("remove_time")
     if remove_time:
-        try:
-            remove_min = _wall_time_to_minutes(str(remove_time))
-            if remove_min < ready_min:
-                feasible = False
-                risk_reasons.append("expires_before_ready")
-        except ValueError:
+        remove_min = _wall_time_to_minutes(str(remove_time))
+        if remove_min < ready_min:
             feasible = False
-            risk_reasons.append("invalid_remove_time")
+            risk_reasons.append("expires_before_ready")
 
-    try:
-        haul_minutes = int(cargo.get("cost_time_minutes", 0) or 0)
-    except (TypeError, ValueError):
-        haul_minutes = 0
-        feasible = False
-        risk_reasons.append("invalid_cost_time")
-    if haul_minutes < 0:
-        feasible = False
-        risk_reasons.append("negative_cost_time")
+    haul_minutes = int(cargo.get("cost_time_minutes", 0) or 0)
 
     start = cargo.get("start") or {}
     end = cargo.get("end") or {}
-    try:
-        start_lat = float(start["lat"])
-        start_lng = float(start["lng"])
-        end_lat = float(end["lat"])
-        end_lng = float(end["lng"])
-        haul_km = _haversine_km(start_lat, start_lng, end_lat, end_lng)
-    except (KeyError, TypeError, ValueError):
-        haul_km = 0.0
-        feasible = False
-        risk_reasons.append("invalid_start_end")
+    start_lat = float(start["lat"])
+    start_lng = float(start["lng"])
+    end_lat = float(end["lat"])
+    end_lng = float(end["lng"])
+    haul_km = _haversine_km(start_lat, start_lng, end_lat, end_lng)
 
-    finish_min = ready_min + max(0, haul_minutes)
+    finish_min = ready_min + haul_minutes
     total_exec_minutes = max(0, finish_min - int(real_time))
     price_yuan = float(cargo.get("price", 0.0) or 0.0)
     distance_cost = (pickup_km + haul_km) * DEFAULT_COST_PER_KM
@@ -368,7 +404,7 @@ def _estimate_cargo_metrics(item: dict[str, Any], real_time: int) -> dict[str, A
         "haul_km": round(haul_km, 2),
         "pickup_minutes": int(pickup_minutes),
         "load_wait_minutes": int(load_wait_minutes),
-        "haul_minutes": int(max(0, haul_minutes)),
+        "haul_minutes": int(haul_minutes),
         "arrival_min": int(arrival_min),
         "ready_min": int(ready_min),
         "finish_min": int(finish_min),
@@ -428,6 +464,23 @@ def _radius_km(text: str, default: float | None = None) -> float | None:
     if match:
         return float(match.group(1))
     return default
+
+
+def _constraints_for_prompt(value: Any) -> Any:
+    """给模型看的偏好约束：只保留结构化结果，去掉原文/source，避免模型重新解析。"""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"raw_preferences", "source", "notes"}:
+                continue
+            compact = _constraints_for_prompt(item)
+            if compact in (None, {}, []):
+                continue
+            out[key] = compact
+        return out
+    if isinstance(value, list):
+        return [item for item in (_constraints_for_prompt(x) for x in value) if item not in (None, {}, [])]
+    return value
 
 
 def _extract_preference_constraints(preferences: list[str]) -> dict[str, Any]:
