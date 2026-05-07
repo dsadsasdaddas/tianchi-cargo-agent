@@ -38,14 +38,13 @@ class ModelDecisionService:
         lng = float(status["current_lng"])
         cargo_resp = self._api.query_cargo(driver_id=driver_id, latitude=lat, longitude=lng)
         items = cargo_resp.get("items", [])
-        query_scan_cost_minutes = math.ceil(len(items) / 10) if items else 0
-        real_time = int(status["simulation_progress_minutes"]) + query_scan_cost_minutes
+        status_after_query = self._api.get_driver_status(driver_id)
+        real_time = int(status_after_query["simulation_progress_minutes"])
         self._logger.info(
-            "decision input driver_id=%s time_min=%s real_time=%s scan_cost=%s loc=(%.5f,%.5f) cargo_items=%s",
+            "decision input driver_id=%s time_min=%s real_time=%s loc=(%.5f,%.5f) cargo_items=%s",
             driver_id,
             status.get("simulation_progress_minutes"),
             real_time,
-            query_scan_cost_minutes,
             lat,
             lng,
             len(items),
@@ -82,6 +81,7 @@ class ModelDecisionService:
             return {"action": "wait", "params": {"duration_minutes": 30}}
         # 有可用货源，调模型决策（只传过滤后的货源）
         prompt = self._build_prompt(driver_id=driver_id, status=status, items=valid_items, real_time=real_time)
+        self._logger.info("prompt_content driver_id=%s prompt=%s", driver_id, prompt[:500])
         model_resp = self._api.model_chat_completion(
             {
                 "messages": [
