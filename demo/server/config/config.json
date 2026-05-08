@@ -1,0 +1,13 @@
+{
+  "cargo_dataset_path": "data/cargo_dataset.jsonl",
+  "drivers_path": "data/drivers.json",
+  "reposition_speed_km_per_hour": 60.0,
+  "model_api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+  "model_api_key": "sk-bfae36fa19164b0085cc341c7c48c6a4",
+  "model_name": "qwen3.5-flash",
+  "model_timeout_seconds": 600,
+  "results_dir": "results",
+  "log_dir": "results/logs",
+  "simulation_max_steps": 2000,
+  "simulation_duration_days": 31
+}
